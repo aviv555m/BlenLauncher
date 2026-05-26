@@ -1,0 +1,12 @@
+plugins {
+    id 'org.openjfx.javafxplugin' version '0.1.0' apply false
+}
+
+subprojects {
+    repositories {
+        mavenCentral()
+        maven { url 'https://libraries.minecraft.net' }
+        maven { url 'https://repo.spongepowered.org/maven' }
+        maven { url 'https://api.ashcon.app/maven/v1' }
+    }
+}

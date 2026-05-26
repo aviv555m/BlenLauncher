@@ -1,0 +1,118 @@
+plugins {
+    id 'java'
+    id 'org.openjfx.javafxplugin'
+}
+
+group = 'com.blen'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+javafx {
+    version = '21'
+    modules = ['javafx.controls', 'javafx.fxml']
+}
+
+dependencies {
+    implementation project(':core')
+    implementation 'com.google.code.gson:gson:2.10.1'
+}
+
+// Main class entry point
+jar {
+    manifest {
+        attributes 'Main-Class': 'com.blen.launcher.LauncherBootstrap'
+    }
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+// Create an app image for the launcher using jpackage (requires JDK with jpackage available)
+task createAppImage(type: Exec) {
+    dependsOn jar
+    def outDir = file("$buildDir/installer")
+    doFirst { outDir.mkdirs() }
+
+    def jarName = jar.archiveFileName.get()
+    def jpackageExe = System.getenv('JAVA_HOME') ? new File(System.getenv('JAVA_HOME'), 'bin/jpackage').absolutePath : 'C:/Program Files/Java/jdk-21/bin/jpackage.exe'
+    def appIcon = file('src/main/resources/icons/blen.ico').absolutePath
+
+    doFirst {
+        // On Windows the previous app-image EXE can remain locked if it was launched.
+        try {
+            exec {
+                commandLine 'cmd', '/c', 'taskkill', '/IM', 'BlenLauncher.exe', '/F'
+                ignoreExitValue = true
+            }
+        } catch (Exception ignored) {
+        }
+
+        def outputAppDir = file("$outDir/BlenLauncher")
+        if (outputAppDir.exists()) {
+            ant.delete(dir: outputAppDir, quiet: true, failonerror: false)
+        }
+    }
+
+    commandLine = [
+        jpackageExe,
+        '--name', 'BlenLauncher',
+        '--input', "$buildDir/libs",
+        '--main-jar', jarName,
+        '--main-class', 'com.blen.launcher.LauncherBootstrap',
+        '--type', 'app-image',
+        '--icon', appIcon,
+        '--jlink-options', '--strip-debug --no-man-pages --no-header-files',
+        '--dest', outDir.absolutePath
+    ]
+}
+
+task createInstaller(type: Exec) {
+    dependsOn jar
+    doFirst {
+        def outDir = file("$buildDir/installer")
+        outDir.mkdirs()
+        def jarName = jar.archiveFileName.get()
+        def jpackageExe = System.getenv('JAVA_HOME') ? new File(System.getenv('JAVA_HOME'), 'bin/jpackage').absolutePath : 'jpackage'
+        def appIcon = file('src/main/resources/icons/blen.ico').absolutePath
+        commandLine = [
+            jpackageExe,
+            '--name', 'BlenLauncher',
+            '--input', "$buildDir/libs",
+            '--main-jar', jarName,
+            '--main-class', 'com.blen.launcher.LauncherBootstrap',
+            '--type', 'exe',
+            '--icon', appIcon,
+            '--jlink-options', '--strip-debug --no-man-pages --no-header-files',
+            '--dest', outDir.absolutePath,
+            '--win-console',
+            '--win-shortcut',
+            '--win-menu',
+            '--win-dir-chooser'
+        ]
+    }
+}
+
+task createInnoInstaller(type: Exec) {
+    dependsOn createAppImage
+    doFirst {
+        def configuredIscc = System.getenv('ISCC_PATH')
+        def isccCandidates = [
+            configuredIscc,
+            'C:/Program Files (x86)/Inno Setup 6/ISCC.exe',
+            "${System.getProperty('user.home')}/AppData/Local/Programs/Inno Setup 6/ISCC.exe"
+        ].findAll { it != null }
+        def isccExe = isccCandidates.find { file(it).exists() }
+        if (isccExe == null) {
+            throw new GradleException("Inno Setup compiler not found. Checked: ${isccCandidates.join(', ')}. Install Inno Setup or set ISCC_PATH, or run :launcher:createInstaller for jpackage EXE output.")
+        }
+        commandLine = [
+            isccExe,
+            file('installer/BlenLauncher.iss').absolutePath
+        ]
+    }
+}

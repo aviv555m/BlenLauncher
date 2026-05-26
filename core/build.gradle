@@ -1,0 +1,18 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.blen'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+dependencies {
+    implementation 'com.google.code.gson:gson:2.10.1'
+    implementation 'org.lz4:lz4-java:1.8.0'
+    implementation 'org.tukaani:xz:1.9'
+    implementation 'com.moandjiezana.toml:toml4j:0.7.2'
+}

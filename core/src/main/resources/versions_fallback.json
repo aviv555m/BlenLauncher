@@ -1,0 +1,5 @@
+[
+  { "id": "1.20.2", "type": "release", "releaseTime": 1700000000 },
+  { "id": "1.19.4", "type": "release", "releaseTime": 1660000000 },
+  { "id": "23w06a", "type": "snapshot", "releaseTime": 1670000000 }
+]
