@@ -6,3 +6,4 @@ launcher/javafx-sdk/
 *.tmp
 *.zip
 *.class
+.vscode/

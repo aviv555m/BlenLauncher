@@ -2,7 +2,6 @@ package com.blen.launcher.controller;
 
 import com.blen.core.auth.AuthManager;
 import javafx.fxml.FXML;
-import javafx.application.Platform;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.PasswordField;
@@ -29,12 +28,6 @@ public class LoginScreenController {
         // Default storage directory in user's home
         Path storageDir = Paths.get(System.getProperty("user.home"), ".blen-launcher");
         authManager = new AuthManager(storageDir);
-
-        // If already logged in, skip to main screen
-        if (authManager.isLoggedIn()) {
-            // Run after scene attachment to avoid null getScene()/getWindow.
-            Platform.runLater(this::switchToMainScreen);
-        }
     }
 
     @FXML
