@@ -4,29 +4,47 @@ import com.blen.core.assets.AssetManager;
 import com.blen.core.auth.AuthManager;
 import com.blen.core.auth.Session;
 import com.blen.core.launch.GameLauncher;
+import com.blen.core.performance.SmoothEngine;
 import com.blen.core.skin.SkinService;
 import com.blen.core.version.MinecraftVersion;
 import com.blen.core.version.VersionManager;
 import javafx.application.Platform;
 import javafx.concurrent.Task;
 import javafx.fxml.FXML;
+import javafx.fxml.FXMLLoader;
+import javafx.scene.Scene;
 import javafx.scene.control.*;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
+import javafx.stage.Stage;
 
+import java.awt.Desktop;
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 
 /**
- * Controller for the main launcher screen. Handles version selection and game launching.
+ * Controller for the main launcher screen.
+ * Handles version management, RAM allocation, smooth mods auto-installation, and launching.
  */
 public class MainScreenController {
     @FXML
     private Label welcomeLabel;
     @FXML
+    private ImageView avatarImage;
+    @FXML
     private ComboBox<MinecraftVersion> versionCombo;
+    @FXML
+    private CheckBox smoothOptCheck;
+    @FXML
+    private CheckBox smoothModsCheck;
+    @FXML
+    private ComboBox<String> ramCombo;
     @FXML
     private Button launchButton;
     @FXML
@@ -34,35 +52,81 @@ public class MainScreenController {
     @FXML
     private ProgressIndicator progressIndicator;
     @FXML
-    private javafx.scene.control.TextArea logsArea;
+    private TextArea logsArea;
 
     private AuthManager authManager;
     private VersionManager versionManager;
     private AssetManager assetManager;
     private SkinService skinService;
     private GameLauncher gameLauncher;
+    private SmoothEngine smoothEngine;
     private Session session;
     private Process currentProcess;
+    private Path installDir;
 
     public void initialize() {
-        Path installDir = Paths.get(System.getProperty("user.home"), ".blen-launcher", "minecraft");
-        authManager = new AuthManager(Paths.get(System.getProperty("user.home"), ".blen-launcher"));
+        Path baseDir = Paths.get(System.getProperty("user.home"), ".blen-launcher");
+        this.installDir = baseDir.resolve("minecraft");
+
+        authManager = new AuthManager(baseDir);
         versionManager = new VersionManager(installDir);
         assetManager = new AssetManager(installDir);
         skinService = new SkinService(installDir);
         gameLauncher = new GameLauncher(installDir, versionManager);
+        smoothEngine = new SmoothEngine(installDir);
 
         session = authManager.getCurrentSession();
         if (session != null) {
             welcomeLabel.setText("Welcome, " + session.getUsername() + "!");
+            loadAvatarAsync(session.getUsername());
+        } else {
+            welcomeLabel.setText("Welcome!");
         }
 
-        // Ensure logs area is clear
+        // Setup RAM options
+        if (ramCombo != null) {
+            ramCombo.getItems().addAll("2 GB", "4 GB", "6 GB", "8 GB", "12 GB", "16 GB");
+            ramCombo.getSelectionModel().select("4 GB");
+        }
+
+        if (smoothOptCheck != null) {
+            smoothOptCheck.setSelected(true);
+        }
+        if (smoothModsCheck != null) {
+            smoothModsCheck.setSelected(true);
+        }
+
         if (logsArea != null) {
             logsArea.clear();
         }
 
-        // Load versions in background
+        loadVersions();
+    }
+
+    private void loadAvatarAsync(String username) {
+        new Thread(() -> {
+            try {
+                Path avatarPath = skinService.downloadAndCacheAvatar(username);
+                if (avatarPath != null && Files.exists(avatarPath)) {
+                    Platform.runLater(() -> {
+                        try {
+                            if (avatarImage != null) {
+                                avatarImage.setImage(new Image(avatarPath.toUri().toString()));
+                            }
+                        } catch (Exception ignored) {}
+                    });
+                }
+            } catch (Exception ignored) {
+            }
+        }).start();
+    }
+
+    @FXML
+    private void handleRefreshVersions() {
+        if (versionCombo != null) {
+            versionCombo.getItems().clear();
+        }
+        statusLabel.setText("Refreshing version list...");
         loadVersions();
     }
 
@@ -73,7 +137,6 @@ public class MainScreenController {
                 try {
                     return versionManager.getAvailableVersions();
                 } catch (Exception ex) {
-                    // try a more forgiving call for releases only or fallback to empty list
                     try {
                         return versionManager.getReleaseVersions();
                     } catch (Exception ex2) {
@@ -85,31 +148,84 @@ public class MainScreenController {
 
         task.setOnSucceeded(e -> {
             List<MinecraftVersion> versions = task.getValue();
-            for (MinecraftVersion v : versions) {
-                versionCombo.getItems().add(v);
+            if (versionCombo != null) {
+                versionCombo.getItems().clear();
+                for (MinecraftVersion v : versions) {
+                    versionCombo.getItems().add(v);
+                }
+                if (!versions.isEmpty()) {
+                    versionCombo.getSelectionModel().selectFirst();
+                }
             }
-            if (!versions.isEmpty()) {
-                // Default to latest release
-                versionCombo.getSelectionModel().selectFirst();
-            }
+            statusLabel.setText("Ready to play");
         });
 
         task.setOnFailed(e -> {
             statusLabel.setText("Failed to load versions: " + task.getException().getMessage());
-            // provide a friendly hint and keep the launch button disabled
-            versionCombo.setPromptText("No versions available");
+            if (versionCombo != null) {
+                versionCombo.setPromptText("No versions available");
+            }
         });
 
         new Thread(task).start();
     }
 
     @FXML
+    private void handleLogout() {
+        try {
+            authManager.logout();
+            FXMLLoader loader = new FXMLLoader(getClass().getResource("/fxml/LoginScreen.fxml"));
+            Scene scene = new Scene(loader.load(), 900, 560);
+            scene.getStylesheets().add("/css/styles.css");
+
+            if (launchButton.getScene() != null && launchButton.getScene().getWindow() instanceof Stage stage) {
+                stage.setScene(scene);
+            }
+        } catch (Exception ex) {
+            showAlert("Logout Error", "Failed to logout: " + ex.getMessage());
+        }
+    }
+
+    @FXML
+    private void handleOpenGameDir() {
+        try {
+            Files.createDirectories(installDir);
+            if (Desktop.isDesktopSupported()) {
+                Desktop.getDesktop().open(installDir.toFile());
+            }
+        } catch (Exception ex) {
+            showAlert("Open Directory Error", "Could not open folder: " + ex.getMessage());
+        }
+    }
+
+    @FXML
+    private void handleClearLogs() {
+        if (logsArea != null) {
+            logsArea.clear();
+        }
+    }
+
+    @FXML
     private void handleLaunch() {
-        MinecraftVersion selected = versionCombo.getValue();
+        MinecraftVersion selected = versionCombo != null ? versionCombo.getValue() : null;
         if (selected == null) {
-            showAlert("No Version Selected", "Please select a version to play.");
+            showAlert("No Version Selected", "Please select a Minecraft version to play.");
             return;
         }
+
+        int ramGb = 4;
+        if (ramCombo != null && ramCombo.getValue() != null) {
+            try {
+                String ramText = ramCombo.getValue().split(" ")[0];
+                ramGb = Integer.parseInt(ramText);
+            } catch (Exception ignored) {
+                ramGb = 4;
+            }
+        }
+
+        final int selectedRam = ramGb;
+        final boolean enableSmoothOpt = smoothOptCheck != null && smoothOptCheck.isSelected();
+        final boolean enableSmoothMods = smoothModsCheck != null && smoothModsCheck.isSelected();
 
         // Disable UI during launch
         launchButton.setDisable(true);
@@ -120,24 +236,34 @@ public class MainScreenController {
         Task<Boolean> launchTask = new Task<>() {
             @Override
             protected Boolean call() throws Exception {
-                // Always verify version files so missing libraries get repaired.
-                updateMessage("Verifying Minecraft " + selected.getId() + " files...");
-                versionManager.downloadVersion(selected, this::updateMessage);
+                MinecraftVersion versionToLaunch = selected;
 
-                // Verify/download missing assets.
-                updateMessage("Preparing assets (first launch can take a few minutes)...");
+                // 1. If Smooth Mods is enabled, install Fabric + Sodium
+                if (enableSmoothMods) {
+                    updateMessage("Configuring smooth performance mods for " + selected.getId() + "...");
+                    String moddedVersionId = smoothEngine.installSmoothMods(selected.getId(), this::updateMessage);
+                    if (!moddedVersionId.equals(selected.getId())) {
+                        versionToLaunch = new MinecraftVersion(moddedVersionId, "release", selected.getTime());
+                    }
+                }
+
+                // 2. Download and verify game files and libraries
+                updateMessage("Verifying Minecraft " + versionToLaunch.getId() + " files...");
+                versionManager.downloadVersion(versionToLaunch, this::updateMessage);
+
+                // 3. Download assets (using multi-threaded asset engine)
+                updateMessage("Checking assets...");
                 assetManager.downloadAssets(selected.getId(), this::updateMessage);
 
-                // Launch the game
-                updateMessage("Launching Minecraft " + selected.getId() + "...");
+                // 4. Launch the game
+                updateMessage("Launching Minecraft " + versionToLaunch.getId() + " (RAM: " + selectedRam + "GB)...");
                 currentProcess = authManager.getCurrentSession() != null
-                    ? gameLauncher.launch(authManager.getCurrentSession(), selected)
+                    ? gameLauncher.launch(authManager.getCurrentSession(), versionToLaunch, selectedRam, enableSmoothOpt)
                     : null;
 
                 if (currentProcess != null) {
                     final StringBuilder processLog = new StringBuilder();
 
-                    // Read and display game output in UI log box
                     Thread outputThread = new Thread(() -> {
                         try (BufferedReader reader = new BufferedReader(
                                 new InputStreamReader(currentProcess.getInputStream()))) {
@@ -154,14 +280,12 @@ public class MainScreenController {
                                     }
                                 });
                             }
-                        } catch (IOException ex) {
-                            // Process ended
+                        } catch (IOException ignored) {
                         }
                     });
                     outputThread.setDaemon(true);
                     outputThread.start();
 
-                    // Wait for process to exit and surface non-zero exit as an error.
                     int exitCode = currentProcess.waitFor();
                     if (exitCode != 0) {
                         String tail;

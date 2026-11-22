@@ -23,31 +23,12 @@ public class AuthManager {
      * "OfflinePlayer:" + username, then SHA-1 hash -> first 16 bytes as UUID (version 3).
      */
     public static String generateOfflineUuid(String username) {
-        // Use MD5 instead of SHA-1 to match the exact MC offline UUID algorithm
-        java.security.MessageDigest digest;
-        try {
-            digest = java.security.MessageDigest.getInstance("MD5");
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new RuntimeException("MD5 not available", e);
+        if (username == null) {
+            return UUID.randomUUID().toString();
         }
-        byte[] hash = digest.digest(("OfflinePlayer:" + username).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-
-        // Take first 16 bytes and format as UUID with version 2 (offline)
-        // Actually MC uses version 3 (MD5-based), but the offline ones don't have a standard version
-        // The real algorithm: take all 16 bytes, set version and variant bits
-        byte[] uuidBytes = new byte[16];
-        System.arraycopy(hash, 0, uuidBytes, 0, 16);
-
-        // Set version (bits 48-51 = 2 for offline)
-        uuidBytes[6] = (byte) ((uuidBytes[6] & 0x0F) | (2 << 4));
-        // Set variant (bits 64-65 = 10)
-        uuidBytes[8] = (byte) ((uuidBytes[8] & 0x3F) | 0x80);
-
-        UUID uuid = new UUID(
-            java.nio.ByteBuffer.wrap(uuidBytes, 0, 8).getLong(),
-            java.nio.ByteBuffer.wrap(uuidBytes, 8, 8).getLong()
-        );
-        return uuid.toString();
+        return UUID.nameUUIDFromBytes(
+            ("OfflinePlayer:" + username).getBytes(java.nio.charset.StandardCharsets.UTF_8)
+        ).toString();
     }
 
     /**

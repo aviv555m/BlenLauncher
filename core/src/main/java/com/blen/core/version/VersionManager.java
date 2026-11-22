@@ -81,8 +81,26 @@ public class VersionManager {
             long time = 0;
             if (v.has("releaseTime")) {
                 try {
-                    if (v.get("releaseTime").isJsonPrimitive() && v.get("releaseTime").getAsJsonPrimitive().isNumber()) {
-                        time = v.get("releaseTime").getAsLong();
+                    JsonElement rt = v.get("releaseTime");
+                    if (rt.isJsonPrimitive()) {
+                        if (rt.getAsJsonPrimitive().isNumber()) {
+                            time = rt.getAsLong();
+                        } else {
+                            time = java.time.Instant.parse(rt.getAsString()).toEpochMilli();
+                        }
+                    }
+                } catch (Exception ex) {
+                    time = 0;
+                }
+            } else if (v.has("time")) {
+                try {
+                    JsonElement t = v.get("time");
+                    if (t.isJsonPrimitive()) {
+                        if (t.getAsJsonPrimitive().isNumber()) {
+                            time = t.getAsLong();
+                        } else {
+                            time = java.time.Instant.parse(t.getAsString()).toEpochMilli();
+                        }
                     }
                 } catch (Exception ex) {
                     time = 0;
@@ -111,9 +129,15 @@ public class VersionManager {
             .sorted(Comparator.comparingLong(MinecraftVersion::getTime).reversed())
             .collect(Collectors.toList());
 
+        List<MinecraftVersion> others = versions.stream()
+            .filter(v -> !"release".equals(v.getType()) && !"snapshot".equals(v.getType()))
+            .sorted(Comparator.comparingLong(MinecraftVersion::getTime).reversed())
+            .collect(Collectors.toList());
+
         availableVersions = new ArrayList<>();
         availableVersions.addAll(releases);
         availableVersions.addAll(snapshots);
+        availableVersions.addAll(others);
 
         versionsLoaded.set(true);
         return availableVersions;
@@ -151,23 +175,37 @@ public class VersionManager {
         Path versionDir = getVersionDir(version.getId());
         Files.createDirectories(versionDir);
 
-        // Download the version's JSON manifest. Prefer the manifest URL we recorded earlier.
-        String manifestUrl = versionManifestUrls.get(version.getId());
-        if (manifestUrl == null) {
-            // fallback: try a known piston-data path (older layout)
-            manifestUrl = DOWNLOAD_BASE + "/mc/download/" + version.getId();
+        Path manifestPath = versionDir.resolve(version.getId() + ".json");
+        String manifestJson;
+
+        if (Files.exists(manifestPath)) {
+            manifestJson = Files.readString(manifestPath);
+        } else {
+            String manifestUrl = versionManifestUrls.get(version.getId());
+            if (manifestUrl == null) {
+                manifestUrl = DOWNLOAD_BASE + "/mc/download/" + version.getId();
+            }
+            manifestJson = downloadString(manifestUrl);
+            Files.writeString(manifestPath, manifestJson);
         }
-        String manifestJson = downloadString(manifestUrl);
+
         JsonObject manifest = gson.fromJson(manifestJson, JsonObject.class);
 
-        // Download the game jar
+        // Handle version inheritance (e.g. Fabric profiles inherit from vanilla version)
+        if (manifest.has("inheritsFrom")) {
+            String parentId = manifest.get("inheritsFrom").getAsString();
+            if (callback != null) callback.onProgress("Downloading base game version " + parentId + "...");
+            downloadVersion(new MinecraftVersion(parentId, "release", 0), callback);
+        }
+
+        // Download the game jar if specified in downloads.client
         if (manifest.has("downloads") && manifest.getAsJsonObject("downloads").has("client")) {
             JsonObject clientDownload = manifest.getAsJsonObject("downloads").getAsJsonObject("client");
             String clientUrl = clientDownload.get("url").getAsString();
             String downloadUrl = clientUrl.startsWith("http") ? clientUrl : DOWNLOAD_BASE + clientUrl;
             Path jarPath = versionDir.resolve(version.getId() + ".jar");
 
-            if (!Files.exists(jarPath)) {
+            if (!Files.exists(jarPath) || Files.size(jarPath) == 0) {
                 if (callback != null) callback.onProgress("Downloading Minecraft " + version.getId() + "...");
                 downloadFile(downloadUrl, jarPath, callback);
             }
@@ -182,24 +220,46 @@ public class VersionManager {
             for (JsonElement libEl : libraries) {
                 JsonObject lib = libEl.getAsJsonObject();
 
-                // Skip client-only rule check for simplicity
+                // Check OS rules to only download Windows libraries
+                if (!isLibraryAllowed(lib)) {
+                    continue;
+                }
+
                 if (lib.has("downloads")) {
                     JsonObject downloads = lib.getAsJsonObject("downloads");
+
+                    // Standard artifact
                     if (downloads.has("artifact")) {
                         JsonObject artifact = downloads.getAsJsonObject("artifact");
-                        String path = artifact.get("path").getAsString();
-                        String artifactUrl = artifact.get("url").getAsString();
-                        String url = artifactUrl.startsWith("http") ? artifactUrl : DOWNLOAD_BASE + artifactUrl;
-
-                        Path libPath = installDir.resolve("libraries").resolve(path);
-                        Path parent = libPath.getParent();
-                        if (parent != null && !Files.exists(parent)) {
-                            Files.createDirectories(parent);
+                        if (artifact.has("path") && artifact.has("url")) {
+                            Path libPath = installDir.resolve("libraries").resolve(artifact.get("path").getAsString());
+                            downloadArtifactIfMissing(artifact.get("url").getAsString(), libPath, callback);
                         }
+                    }
 
-                        if (!Files.exists(libPath) || Files.size(libPath) == 0) {
-                            downloadFile(url, libPath, callback);
+                    // Classifiers (Windows natives for older Minecraft versions)
+                    if (downloads.has("classifiers")) {
+                        JsonObject classifiers = downloads.getAsJsonObject("classifiers");
+                        String[] nativeKeys = {"natives-windows", "natives-windows-64", "natives-windows-x86_64"};
+                        for (String key : nativeKeys) {
+                            if (classifiers.has(key)) {
+                                JsonObject nativeArtifact = classifiers.getAsJsonObject(key);
+                                if (nativeArtifact.has("path") && nativeArtifact.has("url")) {
+                                    Path nativePath = installDir.resolve("libraries").resolve(nativeArtifact.get("path").getAsString());
+                                    downloadArtifactIfMissing(nativeArtifact.get("url").getAsString(), nativePath, callback);
+                                }
+                            }
                         }
+                    }
+                } else if (lib.has("name") && lib.has("url")) {
+                    // Maven style library (e.g. Fabric libraries)
+                    String name = lib.get("name").getAsString();
+                    String repoUrl = lib.get("url").getAsString();
+                    String relPath = mavenNameToPath(name);
+                    if (relPath != null) {
+                        String fullUrl = repoUrl.endsWith("/") ? repoUrl + relPath : repoUrl + "/" + relPath;
+                        Path libPath = installDir.resolve("libraries").resolve(relPath);
+                        downloadArtifactIfMissing(fullUrl, libPath, callback);
                     }
                 }
 
@@ -210,76 +270,139 @@ public class VersionManager {
             }
         }
 
-        // Save the manifest locally for future reference
-        Path manifestPath = versionDir.resolve(version.getId() + ".json");
-        if (!Files.exists(manifestPath)) {
-            Files.writeString(manifestPath, gson.toJson(manifest));
-        }
-
         if (callback != null) {
             callback.onProgress("Version " + version.getId() + " ready!");
         }
         return true;
     }
 
+    private void downloadArtifactIfMissing(String urlString, Path libPath, ProgressCallback callback) {
+        try {
+            if (Files.exists(libPath) && Files.size(libPath) > 0) {
+                return;
+            }
+            Path parent = libPath.getParent();
+            if (parent != null && !Files.exists(parent)) {
+                Files.createDirectories(parent);
+            }
+            String url = urlString.startsWith("http") ? urlString : DOWNLOAD_BASE + urlString;
+            downloadFile(url, libPath, callback);
+        } catch (Exception ex) {
+            System.err.println("Failed to download library: " + libPath + " - " + ex.getMessage());
+        }
+    }
+
+    public static String mavenNameToPath(String mavenName) {
+        String[] parts = mavenName.split(":");
+        if (parts.length < 3) return null;
+        String group = parts[0].replace('.', '/');
+        String artifact = parts[1];
+        String version = parts[2];
+        String classifier = parts.length > 3 ? "-" + parts[3] : "";
+        return group + "/" + artifact + "/" + version + "/" + artifact + "-" + version + classifier + ".jar";
+    }
+
+    public static boolean isLibraryAllowed(JsonObject lib) {
+        if (!lib.has("rules")) {
+            return true;
+        }
+        boolean allow = false;
+        for (JsonElement ruleEl : lib.getAsJsonArray("rules")) {
+            JsonObject rule = ruleEl.getAsJsonObject();
+            String action = rule.has("action") ? rule.get("action").getAsString() : "allow";
+            boolean applies = true;
+            if (rule.has("os")) {
+                JsonObject os = rule.getAsJsonObject("os");
+                if (os.has("name")) {
+                    String osName = os.get("name").getAsString();
+                    applies = "windows".equalsIgnoreCase(osName);
+                }
+            }
+            if (applies) {
+                allow = "allow".equalsIgnoreCase(action);
+            }
+        }
+        return allow;
+    }
+
     /**
-     * Helper: download a file from a URL with optional progress tracking.
+     * Helper: download a file from a URL with safe temporary file and redirect support.
      */
     private void downloadFile(String urlString, Path destination, ProgressCallback callback) throws IOException, InterruptedException {
-        URL url = URI.create(urlString).toURL();
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setConnectTimeout(30_000);
-        conn.setReadTimeout(60_000);
-        conn.setRequestProperty("User-Agent", "BlenLauncher/1.0");
-
+        HttpURLConnection conn = openConnectionWithRedirects(urlString);
         long contentLength = conn.getContentLengthLong();
         String name = destination.getFileName() != null ? destination.getFileName().toString() : destination.toString();
 
-        try (InputStream in = conn.getInputStream();
-             OutputStream out = Files.newOutputStream(destination,
-                 StandardOpenOption.CREATE_NEW)) {
-            byte[] buffer = new byte[8192];
-            int n;
-            long totalRead = 0;
-            long lastReport = System.currentTimeMillis();
-            while ((n = in.read(buffer)) > 0) {
-                out.write(buffer, 0, n);
-                totalRead += n;
-                if (callback != null && contentLength > 0) {
-                    long now = System.currentTimeMillis();
-                    if (now - lastReport > 500) { // report at most twice per second
-                        int pct = (int) ((totalRead * 100) / contentLength);
-                        callback.onProgress(String.format("Downloading %s: %d%% (%d/%d bytes)", name, pct, totalRead, contentLength));
-                        lastReport = now;
+        Path parent = destination.getParent();
+        if (parent != null && !Files.exists(parent)) {
+            Files.createDirectories(parent);
+        }
+
+        Path partFile = destination.resolveSibling(destination.getFileName().toString() + ".part");
+
+        try {
+            try (InputStream in = conn.getInputStream();
+                 OutputStream out = Files.newOutputStream(partFile,
+                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)) {
+                byte[] buffer = new byte[8192];
+                int n;
+                long totalRead = 0;
+                long lastReport = System.currentTimeMillis();
+                while ((n = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, n);
+                    totalRead += n;
+                    if (callback != null && contentLength > 0) {
+                        long now = System.currentTimeMillis();
+                        if (now - lastReport > 500) {
+                            int pct = (int) ((totalRead * 100) / contentLength);
+                            callback.onProgress(String.format("Downloading %s: %d%% (%d/%d bytes)", name, pct, totalRead, contentLength));
+                            lastReport = now;
+                        }
                     }
                 }
             }
-
-            // final report
-            if (callback != null) {
-                if (contentLength > 0) {
-                    callback.onProgress(String.format("Downloaded %s: 100%% (%d/%d bytes)", name, totalRead, contentLength));
-                } else {
-                    callback.onProgress(String.format("Downloaded %s: %d bytes", name, totalRead));
-                }
-            }
+            Files.move(partFile, destination, StandardCopyOption.REPLACE_EXISTING);
         } finally {
+            try { Files.deleteIfExists(partFile); } catch (Exception ignored) {}
             conn.disconnect();
         }
+    }
+
+    /**
+     * Open an HTTP connection, automatically following HTTP/HTTPS redirects up to 5 times.
+     */
+    private HttpURLConnection openConnectionWithRedirects(String urlString) throws IOException {
+        String currentUrl = urlString;
+        for (int redirects = 0; redirects < 5; redirects++) {
+            URL url = URI.create(currentUrl).toURL();
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setInstanceFollowRedirects(true);
+            conn.setConnectTimeout(30_000);
+            conn.setReadTimeout(60_000);
+            conn.setRequestProperty("User-Agent", "BlenLauncher/1.1");
+
+            int status = conn.getResponseCode();
+            if (status == HttpURLConnection.HTTP_MOVED_TEMP || status == HttpURLConnection.HTTP_MOVED_PERM
+                    || status == 307 || status == 308) {
+                String newUrl = conn.getHeaderField("Location");
+                if (newUrl != null && !newUrl.isBlank()) {
+                    conn.disconnect();
+                    currentUrl = newUrl;
+                    continue;
+                }
+            }
+            return conn;
+        }
+        throw new IOException("Too many redirects for URL: " + urlString);
     }
 
     /**
      * Helper: download a string from URL.
      */
     private String downloadString(String urlString) throws IOException, InterruptedException {
-        URL url = URI.create(urlString).toURL();
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setConnectTimeout(30_000);
-        conn.setReadTimeout(60_000);
-        conn.setRequestProperty("User-Agent", "BlenLauncher/1.0");
-
+        HttpURLConnection conn = openConnectionWithRedirects(urlString);
         try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(conn.getInputStream()))) {
+                new InputStreamReader(conn.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
             StringBuilder sb = new StringBuilder();
             String line;
             while ((line = reader.readLine()) != null) {
@@ -290,6 +413,7 @@ public class VersionManager {
             conn.disconnect();
         }
     }
+
 
     /**
      * Callback interface for download progress.

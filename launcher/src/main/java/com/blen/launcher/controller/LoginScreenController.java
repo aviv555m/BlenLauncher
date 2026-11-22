@@ -28,6 +28,11 @@ public class LoginScreenController {
         // Default storage directory in user's home
         Path storageDir = Paths.get(System.getProperty("user.home"), ".blen-launcher");
         authManager = new AuthManager(storageDir);
+
+        if (authManager.getCurrentSession() != null) {
+            usernameField.setText(authManager.getCurrentSession().getUsername());
+        }
+        usernameField.setOnAction(e -> handleLogin());
     }
 
     @FXML

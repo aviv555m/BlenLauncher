@@ -10,5 +10,3 @@ java -Xmx64M -Xms64M ^
     -Dorg.gradle.appname=gradlew ^
     -classpath "%CLASSPATH%" ^
     org.gradle.wrapper.GradleWrapperMain %*
-
-pause

@@ -3,8 +3,8 @@
 
 [Setup]
 AppName=BlenLauncher
-AppVersion=1.0.1
-DefaultDirName={pf}\BlenLauncher
+AppVersion=1.1.0
+DefaultDirName={autopf}\BlenLauncher
 DefaultGroupName=BlenLauncher
 OutputDir=..\\build\\installer
 OutputBaseFilename=BlenLauncher-Setup
